@@ -1,0 +1,2 @@
+[console_scripts]
+single-email-check = single_email_check:main

@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "single-email-check"
+version = "0.1.0"
+description = "Workbook and single-address email validation, optional subnet duplicate check"
+requires-python = ">=3.10"
+dependencies = [
+    "python-dotenv>=1.0",
+    "requests>=2.31",
+    "aiohttp>=3.9",
+    "dnspython>=2.6",
+    "openpyxl>=3.1",
+    "pandas>=2.0",
+    "httpx>=0.27",
+    "python-whois>=0.9",
+    "disposable-email-domains>=0.0.100",
+]
+
+[project.scripts]
+single-email-check = "single_email_check:main"
+
+[project.optional-dependencies]
+company-enrichment = [
+    "asyncpg>=0.29.0",
+    "redis>=5.0.0",
+]
+
+[tool.setuptools]
+py-modules = ["single_email_check"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]

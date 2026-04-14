@@ -1,0 +1,31 @@
+[
+  {
+    "business": "Acme Analytics GmbH",
+    "full_name": "Jane Doe",
+    "first": "Jane",
+    "last": "Doe",
+    "email": "jane.doe@acme-analytics.example",
+    "role": "Chief Technology Officer",
+    "website": "https://acme-analytics.example/",
+    "industry": "Software",
+    "sub_industry": "SaaS",
+    "country": "Germany",
+    "state": null,
+    "city": "Berlin",
+    "linkedin": "https://linkedin.com/in/janedoe",
+    "company_linkedin": "https://linkedin.com/company/acme-analytics",
+    "source_url": "https://acme-analytics.example/about/",
+    "description": "B2B analytics platform for operations teams.",
+    "employee_count": "51-200",
+    "hq_country": "Germany",
+    "hq_state": null,
+    "hq_city": "Berlin",
+    "source_type": "company_website",
+    "phone_numbers": [
+      "+49 30 1234567"
+    ],
+    "socials": {
+      "twitter": "https://twitter.com/acmeanalytics/"
+    }
+  }
+]
