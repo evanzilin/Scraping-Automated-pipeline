@@ -58,6 +58,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -65,6 +66,8 @@ from urllib.parse import unquote, urljoin, urlparse
 
 import requests
 
+from lead_cache_json.lead_json_io import write_lead_json_to_temp_file
+from lead_cache_json.validators import apply_empty_string_to_null, validate_output_record
 from scrape_api_key import get_scrape_api_key
 
 # Web Scrape API — returns page HTML (parse JSON-LD / meta locally). Typically lowest cost per
@@ -2765,9 +2768,76 @@ def domain_to_lead_format_json(
 
 
 def default_not_dup_extract_json_path(xlsx_path: Path | str) -> Path:
-    """``{workbook_stem}_not_dup_extract.json`` beside the workbook (same directory)."""
+    """``{workbook_stem}_not_dup_extract`` directory beside the workbook."""
     p = Path(xlsx_path).resolve()
-    return p.parent / f"{p.stem}_not_dup_extract.json"
+    return p.parent / f"{p.stem}_not_dup_extract"
+
+
+def _lead_created_time_token(lead: Dict[str, Any], *, fallback_index: int) -> str:
+    """
+    Build a filesystem-safe created-time token for one lead file.
+
+    Prefers a pre-existing created-time-ish field when present; otherwise uses current UTC time
+    with microseconds plus the row index for uniqueness.
+    """
+    for key in ("created_time", "created_at", "timestamp"):
+        raw = lead.get(key)
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if not text:
+            continue
+        token = re.sub(r"[^0-9A-Za-z]+", "", text)
+        if token:
+            return token
+    now = datetime.now(timezone.utc)
+    return now.strftime("%Y%m%dT%H%M%S%fZ") + f"_{fallback_index:04d}"
+
+
+def _write_not_dup_extract_lead_files(leads: List[Dict[str, Any]], output_root: Path) -> List[Path]:
+    """
+    Write one JSON file per lead object under ``output_root`` using ``lead{created_time}.json`` names.
+    """
+    out_dir = output_root.resolve()
+    written: List[Path] = []
+    used_names: set[str] = set()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for idx, lead in enumerate(leads, start=1):
+        base = f"lead{_lead_created_time_token(lead, fallback_index=idx)}"
+        name = base
+        suffix = 2
+        while f"{name}.json" in used_names or (out_dir / f"{name}.json").exists():
+            name = f"{base}_{suffix}"
+            suffix += 1
+        path = write_lead_json_to_temp_file(lead, out_dir, filename=name)
+        used_names.add(path.name)
+        written.append(path)
+    return written
+
+
+def _filter_complete_export_leads(
+    leads: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Keep only leads that satisfy the final JSON contract; return skipped items with reasons.
+    """
+    kept: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    for idx, lead in enumerate(leads, start=1):
+        row = apply_empty_string_to_null(dict(lead))
+        ok, reasons = validate_output_record(row)
+        if ok:
+            kept.append(lead)
+        else:
+            skipped.append(
+                {
+                    "index": idx,
+                    "website": str(lead.get("website") or "").strip(),
+                    "business": str(lead.get("business") or "").strip(),
+                    "reasons": reasons,
+                }
+            )
+    return kept, skipped
 
 
 # Columns omitted from ``database_*_not_dup_extract.json`` (header match is case-insensitive).
@@ -2822,7 +2892,6 @@ def _records_for_not_dup_json_export(records: List[Dict[str, Any]]) -> List[Dict
                 "last": _null_if_blank(last),
                 "email": _null_if_blank(cleaned.get("personal_email")),
                 "role": _null_if_blank(role),
-                "seniority": None,
                 "website": _null_if_blank(website),
                 "industry": None,
                 "sub_industry": None,
@@ -3082,14 +3151,14 @@ if __name__ == "__main__":
         type=Path,
         default=None,
         help=(
-            "When using --database-xlsx (no positional domain), write filtered rows as a JSON array "
-            "(default: <workbook_stem>_not_dup_extract.json next to the workbook)"
+            "When using --database-xlsx (no positional domain), write one JSON file per lead object "
+            "into this directory (default: <workbook_stem>_not_dup_extract next to the workbook)"
         ),
     )
     parser.add_argument(
         "--no-extract-json",
         action="store_true",
-        help="Do not write the JSON array file when loading from the database workbook",
+        help="Do not write per-lead JSON files when loading from the database workbook",
     )
     parser.add_argument(
         "--skip-email-check",
@@ -3207,12 +3276,23 @@ if __name__ == "__main__":
     total = len(domains)
     for i, dom in enumerate(domains, start=1):
         print(f"\n{'=' * 60}\n[{i}/{total}] {dom}\n{'=' * 60}", flush=True)
-        if cli.lead_format:
-            lead = domain_to_lead_format_json(dom, api_key=cli.api_key, **enrich_kw)
-            print(json.dumps(lead, indent=2, ensure_ascii=False))
-            scraped_lead = lead
-        else:
+        try:
             enr = enrich_company_web_profile(dom, cli.api_key, **enrich_kw)
+        except Exception as e:
+            print(f"Skipping {dom}: scraping failed with exception: {e}", flush=True)
+            continue
+
+        if enr.error:
+            print(
+                f"Skipping {dom}: scraping failed ({enr.error}).",
+                flush=True,
+            )
+            continue
+
+        if cli.lead_format:
+            scraped_lead = lead_format_json_from_enrichment(enr)
+            print(json.dumps(scraped_lead, indent=2, ensure_ascii=False))
+        else:
             print(json.dumps(enr.to_dict(), indent=2))
             scraped_lead = lead_format_json_from_enrichment(enr)
         if extract_records:
@@ -3221,10 +3301,22 @@ if __name__ == "__main__":
                     extract_records[idx], scraped_lead
                 )
     if out_json is not None and extract_records:
-        out_json.parent.mkdir(parents=True, exist_ok=True)
-        with open(out_json, "w", encoding="utf-8") as f:
-            json.dump(extract_records, f, indent=2, ensure_ascii=False)
+        out_root = out_json
+        if out_root.suffix.lower() == ".json":
+            out_root = out_root.with_suffix("")
+        complete_records, skipped_records = _filter_complete_export_leads(extract_records)
+        if skipped_records:
+            print(
+                f"Skipped {len(skipped_records)} incomplete lead(s) after Scrapingdog fetch.",
+                flush=True,
+            )
+            for item in skipped_records[:10]:
+                label = item["business"] or item["website"] or f"row {item['index']}"
+                print(f"  - {label}: {', '.join(item['reasons'])}", flush=True)
+            if len(skipped_records) > 10:
+                print(f"  ... and {len(skipped_records) - 10} more", flush=True)
+        written_files = _write_not_dup_extract_lead_files(complete_records, out_root)
         print(
-            f"Saved merged lead-format JSON array ({len(extract_records)} object(s)): {out_json}",
+            f"Saved {len(written_files)} lead JSON file(s) in {out_root}",
             flush=True,
         )

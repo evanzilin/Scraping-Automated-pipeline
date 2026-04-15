@@ -1255,7 +1255,12 @@ def _google_organic_results(
     except json.JSONDecodeError:
         return []
     org = data.get("organic_results")
-    return list(org) if isinstance(org, list) else []
+    if isinstance(org, list):
+        return [it for it in org if isinstance(it, dict)]
+    org = data.get("organic_data")
+    if isinstance(org, list):
+        return [it for it in org if isinstance(it, dict)]
+    return []
 
 
 def _linkedin_company_url_from_google_search(
@@ -1269,24 +1274,24 @@ def _linkedin_company_url_from_google_search(
     """
     Resolve ``linkedin.com/company/...`` via Scrapingdog Google Search organic results.
 
-    Tries targeted queries first (``site:linkedin.com/company`` + quoted name, then name + LinkedIn),
-    then a domain-apex hint when the name is missing. Does not scrape the company website for this step.
+    Mirrors the reference approach: query by company name first, optionally include the domain,
+    then normalize the first viable LinkedIn company URL from ``link`` / ``url`` /
+    ``displayed_link``.
     """
     if not (api_key or "").strip():
         return None
     name = (company_name or "").strip()
     root = (domain_root or "").strip().lower()
-    apex = root.split(".")[0] if root else ""
+    domain_hint = root if "." in root else ""
 
     queries: List[str] = []
     if len(name) > 1:
         safe = re.sub(r"\s+", " ", name.replace('"', " ")).strip()
+        if domain_hint:
+            queries.append(f'site:linkedin.com/company "{safe}" "{domain_hint}"')
         queries.append(f'site:linkedin.com/company "{safe}"')
-        queries.append(f'"{safe}" LinkedIn')
+        queries.append(f'"{safe}" "linkedin.com/company"')
         queries.append(f"{safe} LinkedIn company")
-    if len(apex) > 2:
-        if not name or apex.lower() not in name.lower():
-            queries.append(f"site:linkedin.com/company {apex}")
 
     seen_q: set[str] = set()
     for q in queries:
@@ -1301,16 +1306,13 @@ def _linkedin_company_url_from_google_search(
             api_key, qn, timeout=timeout, country=country, results=10
         )
         for it in items:
-            if not isinstance(it, dict):
-                continue
-            link = it.get("link")
-            if isinstance(link, str) and link.strip():
-                li = _normalize_linkedin(link.strip())
-                if li:
-                    return li
-            title = it.get("title")
-            if isinstance(title, str) and "linkedin.com/company/" in title.lower():
-                li = _normalize_linkedin(title.strip())
+            candidates = [
+                str(it.get("link") or "").strip(),
+                str(it.get("url") or "").strip(),
+                str(it.get("displayed_link") or "").strip(),
+            ]
+            for cand in candidates:
+                li = _normalize_linkedin(cand)
                 if li:
                     return li
     return None
