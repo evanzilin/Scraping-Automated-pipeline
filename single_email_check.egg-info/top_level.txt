@@ -1,2 +1,0 @@
-app
-single_email_check
