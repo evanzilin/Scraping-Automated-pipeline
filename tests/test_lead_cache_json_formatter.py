@@ -187,6 +187,15 @@ def test_validate_output_record_fails_name_email_mismatch() -> None:
     assert "name_email_mismatch" in reasons
 
 
+def test_validate_output_record_requires_proprietary_source_type_match() -> None:
+    row = dict(SAMPLE_OUTPUT_RECORD)
+    row["source_url"] = "proprietary_database"
+    row["source_type"] = "company_website"
+    ok, reasons = validate_output_record(row)
+    assert not ok
+    assert "source_type_must_match_proprietary_database" in reasons
+
+
 def test_format_cached_dataset_to_json_writes_files(tmp_path: Path) -> None:
     out = tmp_path / "json-date.json"
     rej = tmp_path / "json-date.rejects.json"
