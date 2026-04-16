@@ -176,6 +176,17 @@ def test_validate_us_requires_state() -> None:
     assert any("state_required" in r for r in reasons)
 
 
+def test_validate_output_record_fails_name_email_mismatch() -> None:
+    row = dict(SAMPLE_OUTPUT_RECORD)
+    row["first"] = "Muhammad"
+    row["last"] = "Arshad"
+    row["full_name"] = "Muhammad Arshad"
+    row["email"] = "waqas@twes.us"
+    ok, reasons = validate_output_record(row)
+    assert not ok
+    assert "name_email_mismatch" in reasons
+
+
 def test_format_cached_dataset_to_json_writes_files(tmp_path: Path) -> None:
     out = tmp_path / "json-date.json"
     rej = tmp_path / "json-date.rejects.json"

@@ -2824,16 +2824,19 @@ def _filter_complete_export_leads(
     kept: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
     for idx, lead in enumerate(leads, start=1):
-        row = apply_empty_string_to_null(dict(lead))
+        public_lead = {
+            k: v for k, v in dict(lead).items() if not str(k).startswith("_")
+        }
+        row = apply_empty_string_to_null(dict(public_lead))
         ok, reasons = validate_output_record(row)
         if ok:
-            kept.append(lead)
+            kept.append(public_lead)
         else:
             skipped.append(
                 {
                     "index": idx,
-                    "website": str(lead.get("website") or "").strip(),
-                    "business": str(lead.get("business") or "").strip(),
+                    "website": str(public_lead.get("website") or "").strip(),
+                    "business": str(public_lead.get("business") or "").strip(),
                     "reasons": reasons,
                 }
             )
@@ -2883,6 +2886,7 @@ def _records_for_not_dup_json_export(records: List[Dict[str, Any]]) -> List[Dict
         phone = _null_if_blank(cleaned.get("Phone"))
         website = _absolute_http_url(str(cleaned.get("Website") or ""))
         linkedin = _absolute_http_url(str(cleaned.get("Person Linkedin Url") or ""))
+        company_linkedin = _absolute_http_url(str(cleaned.get("Company Linkedin Url") or ""))
         full_name = " ".join(x for x in (first, last) if x).strip()
         out.append(
             {
@@ -2893,13 +2897,13 @@ def _records_for_not_dup_json_export(records: List[Dict[str, Any]]) -> List[Dict
                 "email": _null_if_blank(cleaned.get("personal_email")),
                 "role": _null_if_blank(role),
                 "website": _null_if_blank(website),
-                "industry": None,
+                "industry": _null_if_blank(cleaned.get("Industry")),
                 "sub_industry": None,
                 "country": _null_if_blank(cleaned.get("Country")),
                 "state": _null_if_blank(cleaned.get("State")),
                 "city": _null_if_blank(cleaned.get("City")),
                 "linkedin": _null_if_blank(linkedin),
-                "company_linkedin": None,
+                "company_linkedin": _null_if_blank(company_linkedin),
                 "source_url": PROPRIETARY_SOURCE_URL,
                 "description": None,
                 "employee_count": None,
@@ -2908,8 +2912,292 @@ def _records_for_not_dup_json_export(records: List[Dict[str, Any]]) -> List[Dict
                 "hq_city": _null_if_blank(cleaned.get("Company City")),
                 "phone_numbers": [phone] if phone else [],
                 "socials": {},
+                "_db_keywords": _null_if_blank(cleaned.get("Keywords")),
+                "_db_sub_industry_hint": _null_if_blank(
+                    cleaned.get("Sub Industry")
+                    or cleaned.get("Sub-Industry")
+                    or cleaned.get("sub_industry")
+                ),
             }
         )
+    return out
+
+
+def _taxonomy_sub_industry_candidates_for_industry(industry: Optional[str]) -> List[str]:
+    hint = (industry or "").strip().lower()
+    if not hint:
+        return []
+    try:
+        from industry_taxonomy import INDUSTRY_TAXONOMY
+    except ImportError:
+        return []
+    out: List[str] = []
+    for sub_name, meta in INDUSTRY_TAXONOMY.items():
+        inds = meta.get("industries")
+        if not isinstance(inds, list):
+            continue
+        if any(str(it).strip().lower() == hint for it in inds):
+            out.append(str(sub_name))
+    return out
+
+
+def _keywordish_fragments(text: Optional[str]) -> List[str]:
+    raw = re.sub(r"[|;/]+", ",", str(text or ""))
+    seen: set[str] = set()
+    out: List[str] = []
+    for part in (p.strip() for p in raw.split(",") if p.strip()):
+        key = part.lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(part)
+        words = [w for w in re.split(r"\s+", part) if len(w) >= 3]
+        if len(words) <= 1:
+            continue
+        for word in words:
+            wk = word.lower()
+            if wk not in seen:
+                seen.add(wk)
+                out.append(word)
+    return out
+
+
+def _pick_sub_industry_from_database_hints(
+    industry: Optional[str],
+    sub_hint: Optional[str],
+    keywords: Optional[str],
+    description: Optional[str],
+) -> Optional[str]:
+    candidates = _taxonomy_sub_industry_candidates_for_industry(industry)
+    if not candidates:
+        return None
+
+    best_name: Optional[str] = None
+    best_score = 0.0
+    for frag in _keywordish_fragments(sub_hint) + _keywordish_fragments(keywords):
+        frag_norm = re.sub(r"[^a-z0-9]+", "", frag.lower())
+        if not frag_norm:
+            continue
+        for cand in candidates:
+            cand_norm = re.sub(r"[^a-z0-9]+", "", cand.lower())
+            score = 0.0
+            if frag_norm == cand_norm:
+                score = 1.0
+            elif frag_norm in cand_norm or cand_norm in frag_norm:
+                score = 0.92
+            else:
+                score = SequenceMatcher(None, frag_norm, cand_norm).ratio()
+            if score > best_score:
+                best_score = score
+                best_name = cand
+    if best_name and best_score >= 0.74:
+        return best_name
+
+    brief = (description or "").strip()
+    if brief and (industry or "").strip():
+        guessed = _pick_sub_industry_from_taxonomy_definition_similarity(brief, industry)
+        if guessed:
+            return guessed
+        try:
+            from lead_cache_json.industry_normalizer import (
+                classify_industry_sub_from_description_in_scope,
+            )
+
+            ci, cs, _err = classify_industry_sub_from_description_in_scope(
+                brief,
+                allowed_parent_industries=[str(industry)],
+                industry_hint=industry,
+            )
+            if ci and cs:
+                return cs
+        except ImportError:
+            pass
+    return None
+
+
+def _linkedin_profile_api_description(
+    *sources: Optional[Dict[str, Any]],
+    max_len: int = 2000,
+) -> Optional[str]:
+    keys = frozenset(
+        {
+            "about",
+            "aboutus",
+            "companydescription",
+            "companyoverview",
+            "description",
+            "headline",
+            "overview",
+            "summary",
+            "tagline",
+        }
+    )
+
+    def walk(obj: Any, depth: int = 0) -> List[str]:
+        out: List[str] = []
+        if depth > 14 or obj is None:
+            return out
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                kl = str(k).lower().replace("-", "").replace("_", "")
+                if kl in keys:
+                    if isinstance(v, str):
+                        t = re.sub(r"\s+", " ", v.strip())
+                        if len(t) >= _MIN_SCRAPED_DESCRIPTION_LEN:
+                            out.append(t)
+                    elif isinstance(v, dict):
+                        for kk in ("text", "label", "value", "name", "description"):
+                            x = v.get(kk)
+                            if isinstance(x, str):
+                                t = re.sub(r"\s+", " ", x.strip())
+                                if len(t) >= _MIN_SCRAPED_DESCRIPTION_LEN:
+                                    out.append(t)
+                                    break
+                out.extend(walk(v, depth + 1))
+        elif isinstance(obj, list):
+            for it in obj[:48]:
+                out.extend(walk(it, depth + 1))
+        return out
+
+    seen: set[str] = set()
+    best: Optional[str] = None
+    for data in sources:
+        if not data:
+            continue
+        for raw in walk(data):
+            key = raw.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            if best is None or len(raw) > len(best):
+                best = raw[:max_len] if len(raw) > max_len else raw
+    return best
+
+
+def _supplement_scraped_lead_from_database_profile(
+    base_lead: Dict[str, Any],
+    scraped_lead: Dict[str, Any],
+    *,
+    api_key: str,
+    timeout: float = 60.0,
+) -> Dict[str, Any]:
+    merged = dict(scraped_lead)
+
+    def is_non_blank(v: Any) -> bool:
+        if v is None:
+            return False
+        if isinstance(v, str):
+            return bool(v.strip())
+        if isinstance(v, (list, dict)):
+            return bool(v)
+        return True
+
+    base_company_linkedin = _absolute_http_url(str(base_lead.get("company_linkedin") or ""))
+    if is_non_blank(merged.get("company_linkedin")) or not base_company_linkedin or not (api_key or "").strip():
+        return merged
+
+    li_slug = _linkedin_company_slug_from_url(base_company_linkedin)
+    if not li_slug:
+        return merged
+
+    li_data, li_alt = _fetch_scrapingdog_linkedin_company_profile(
+        api_key,
+        li_slug,
+        timeout=timeout,
+    )
+    if not li_data and not li_alt:
+        merged["company_linkedin"] = base_company_linkedin
+        return merged
+
+    industry_seed = (
+        str(merged.get("industry") or "").strip()
+        or str(base_lead.get("industry") or "").strip()
+    )
+    li_candidates = _linkedin_profile_api_industry_candidates(li_data, li_alt)
+    raw_ind, _ = _merge_raw_industry_from_candidates(
+        li_candidates,
+        industry_seed,
+        None,
+        assign_sub_industry_from_candidates=False,
+    )
+    ind_out, _ = _refine_industry_sub_with_taxonomy(raw_ind, None, li_candidates)
+    if not (ind_out or "").strip() and industry_seed:
+        ind_out = industry_seed
+
+    li_api_ec: Optional[str] = None
+    li_api_hq: Tuple[Optional[str], Optional[str], Optional[str]] = (None, None, None)
+    for blob in (li_data, li_alt):
+        if not blob:
+            continue
+        ec_p, hq_p = _linkedin_profile_api_employee_and_hq(blob)
+        if ec_p and not li_api_ec:
+            li_api_ec = ec_p
+        li_api_hq = _merge_hq_triple(li_api_hq, hq_p)
+
+    hq_city_v, hq_state_v, hq_country_v = li_api_hq
+    _inf_co, _inf_st = _infer_united_states_hq_if_us_state(hq_country_v, hq_state_v)
+    hq_country_v = _inf_co or None
+    hq_state_v = _inf_st or None
+    if hq_country_v and _is_united_states_country(hq_country_v):
+        hq_country_v = _display_hq_country(hq_country_v)
+    if hq_state_v and _is_united_states_country(hq_country_v or ""):
+        hq_state_v = _expand_us_state_abbreviation(hq_state_v.strip()) or hq_state_v
+
+    description_v = _linkedin_profile_api_description(li_data, li_alt)
+    sub_out = _pick_sub_industry_from_database_hints(
+        ind_out,
+        str(base_lead.get("_db_sub_industry_hint") or ""),
+        str(base_lead.get("_db_keywords") or ""),
+        description_v,
+    )
+    if (ind_out or "").strip() and (sub_out or "").strip():
+        try:
+            from lead_cache_json.industry_normalizer import normalize_industry_pair
+
+            io, so, _reason = normalize_industry_pair(ind_out, sub_out)
+            if io and so:
+                ind_out, sub_out = io, so
+        except ImportError:
+            pass
+
+    merged["company_linkedin"] = base_company_linkedin
+    if not is_non_blank(merged.get("industry")) and (ind_out or "").strip():
+        merged["industry"] = ind_out
+    if not is_non_blank(merged.get("sub_industry")) and (sub_out or "").strip():
+        merged["sub_industry"] = sub_out
+    if not is_non_blank(merged.get("description")) and (description_v or "").strip():
+        merged["description"] = description_v
+    if not is_non_blank(merged.get("employee_count")) and li_api_ec:
+        merged["employee_count"] = _pick_employee_count(li_api_ec)
+    if not is_non_blank(merged.get("hq_country")) and (hq_country_v or "").strip():
+        merged["hq_country"] = hq_country_v
+    if not is_non_blank(merged.get("hq_state")) and (hq_state_v or "").strip():
+        merged["hq_state"] = hq_state_v
+    if not is_non_blank(merged.get("hq_city")) and (hq_city_v or "").strip():
+        merged["hq_city"] = hq_city_v
+    return merged
+
+
+def _overlay_enrichment_display_with_lead(
+    enrichment_dict: Dict[str, Any],
+    lead_dict: Dict[str, Any],
+) -> Dict[str, Any]:
+    out = dict(enrichment_dict)
+    for key in (
+        "industry",
+        "sub_industry",
+        "description",
+        "employee_count",
+        "hq_country",
+        "hq_state",
+        "hq_city",
+        "company_linkedin",
+    ):
+        val = lead_dict.get(key)
+        if isinstance(val, str):
+            if val.strip():
+                out[key] = val
+        elif val:
+            out[key] = val
     return out
 
 
@@ -3034,7 +3322,9 @@ def not_dup_rows_from_database_xlsx(
     domains: List[str] = []
     for _, row in sub.iterrows():
         raw_w = row[web_col]
-        w = "" if pd.isna(raw_w) else str(raw_w).strip()
+        w = "" if raw_w is None else str(raw_w).strip()
+        if w.lower() == "nan":
+            w = ""
         dom = _normalize_domain(w)
         if dom and dom not in seen:
             seen.add(dom)
@@ -3284,21 +3574,38 @@ if __name__ == "__main__":
 
         if enr.error:
             print(
-                f"Skipping {dom}: scraping failed ({enr.error}).",
+                f"Continuing {dom}: scraping returned partial result ({enr.error}).",
                 flush=True,
             )
-            continue
+
+        scraped_lead = lead_format_json_from_enrichment(enr)
+        display_enrichment = enr.to_dict()
+        if extract_records and domain_to_record_indices.get(dom):
+            first_idx = domain_to_record_indices[dom][0]
+            display_lead = _supplement_scraped_lead_from_database_profile(
+                extract_records[first_idx],
+                scraped_lead,
+                api_key=cli.api_key,
+            )
+            display_enrichment = _overlay_enrichment_display_with_lead(
+                display_enrichment,
+                display_lead,
+            )
+            scraped_lead = display_lead
 
         if cli.lead_format:
-            scraped_lead = lead_format_json_from_enrichment(enr)
             print(json.dumps(scraped_lead, indent=2, ensure_ascii=False))
         else:
-            print(json.dumps(enr.to_dict(), indent=2))
-            scraped_lead = lead_format_json_from_enrichment(enr)
+            print(json.dumps(display_enrichment, indent=2))
         if extract_records:
             for idx in domain_to_record_indices.get(dom, []):
+                record_scraped = _supplement_scraped_lead_from_database_profile(
+                    extract_records[idx],
+                    scraped_lead,
+                    api_key=cli.api_key,
+                )
                 extract_records[idx] = _merge_export_lead_with_scraped(
-                    extract_records[idx], scraped_lead
+                    extract_records[idx], record_scraped
                 )
     if out_json is not None and extract_records:
         out_root = out_json

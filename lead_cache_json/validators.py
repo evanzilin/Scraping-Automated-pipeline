@@ -5,14 +5,18 @@ Strict validation for formatted lead JSON rows.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, List, Tuple
 
 from lead_cache_json.json_contract import (
     EMPLOYEE_COUNT_BUCKETS,
     K_COUNTRY,
     K_EMPLOYEE_COUNT,
+    K_EMAIL,
+    K_FIRST,
     K_HQ_COUNTRY,
     K_HQ_STATE,
+    K_LAST,
     K_PHONE_NUMBERS,
     K_SOCIALS,
     K_STATE,
@@ -52,6 +56,43 @@ def apply_empty_string_to_null(row: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _check_name_email_match(email: Any, first_name: Any, last_name: Any) -> bool:
+    em = str(email or "").strip().lower()
+    fn = str(first_name or "").strip().lower()
+    ln = str(last_name or "").strip().lower()
+    if "@" not in em or not fn or not ln:
+        return False
+    local = em.split("@", 1)[0]
+    local_normalized = re.sub(r"[^a-z0-9]", "", local)
+    first_normalized = re.sub(r"[^a-z0-9]", "", fn)
+    last_normalized = re.sub(r"[^a-z0-9]", "", ln)
+    min_len = 3
+    patterns = []
+    if len(first_normalized) >= min_len:
+        patterns.append(first_normalized)
+    if len(last_normalized) >= min_len:
+        patterns.append(last_normalized)
+    patterns.append(f"{first_normalized}{last_normalized}")
+    if first_normalized:
+        patterns.append(f"{first_normalized[0]}{last_normalized}")
+        patterns.append(f"{last_normalized}{first_normalized[0]}")
+    patterns = [p for p in patterns if p and len(p) >= min_len]
+    if any(pattern in local_normalized for pattern in patterns):
+        return True
+    if len(local_normalized) >= min_len:
+        if len(first_normalized) >= len(local_normalized) and first_normalized.startswith(local_normalized):
+            return True
+        if len(last_normalized) >= len(local_normalized) and last_normalized.startswith(local_normalized):
+            return True
+        for length in range(min_len, min(len(first_normalized) + 1, 7)):
+            if first_normalized[:length] in local_normalized:
+                return True
+        for length in range(min_len, min(len(last_normalized) + 1, 7)):
+            if last_normalized[:length] in local_normalized:
+                return True
+    return False
+
+
 def validate_output_record(row: Dict[str, Any]) -> Tuple[bool, List[str]]:
     """
     Validate one formatted record against the output contract.
@@ -89,6 +130,9 @@ def validate_output_record(row: Dict[str, Any]) -> Tuple[bool, List[str]]:
     if is_us_lead_country(hq):
         if _is_blank(row.get(K_HQ_STATE)):
             reasons.append("hq_state_required_for_us_company")
+
+    if not _check_name_email_match(row.get(K_EMAIL), row.get(K_FIRST), row.get(K_LAST)):
+        reasons.append("name_email_mismatch")
 
     ok = not reasons
     if not ok:
