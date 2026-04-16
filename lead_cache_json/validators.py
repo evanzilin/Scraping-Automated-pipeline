@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Tuple
 
 from lead_cache_json.json_contract import (
     EMPLOYEE_COUNT_BUCKETS,
+    K_COMPANY_LINKEDIN,
     K_COUNTRY,
     K_EMPLOYEE_COUNT,
     K_EMAIL,
@@ -20,6 +21,8 @@ from lead_cache_json.json_contract import (
     K_PHONE_NUMBERS,
     K_SOCIALS,
     K_STATE,
+    K_SOURCE_TYPE,
+    K_SOURCE_URL,
     REQUIRED_STRING_FIELDS,
     US_COUNTRY_ALIASES,
 )
@@ -133,6 +136,10 @@ def validate_output_record(row: Dict[str, Any]) -> Tuple[bool, List[str]]:
 
     if not _check_name_email_match(row.get(K_EMAIL), row.get(K_FIRST), row.get(K_LAST)):
         reasons.append("name_email_mismatch")
+
+    if str(row.get(K_SOURCE_URL) or "").strip() == "proprietary_database":
+        if str(row.get(K_SOURCE_TYPE) or "").strip() != "proprietary_database":
+            reasons.append("source_type_must_match_proprietary_database")
 
     ok = not reasons
     if not ok:

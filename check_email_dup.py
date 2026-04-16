@@ -160,6 +160,7 @@ _EMAIL_COLUMN_PRIORITY: Tuple[str, ...] = (
     "person_email_analyzed",
     "personal_email",
     "email",
+    "Email",
 )
 
 # First / last name: first matching header in each list wins (one column per role).
