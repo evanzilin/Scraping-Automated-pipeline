@@ -3206,7 +3206,8 @@ def _merge_export_lead_with_scraped(
 ) -> Dict[str, Any]:
     """Overlay non-empty Scrapingdog lead-format values onto one exported workbook lead."""
     merged = dict(base_lead)
-
+    print(f"base_lead: {base_lead}")
+    print(f"scraped_lead: {scraped_lead}")  
     def _non_blank(v: Any) -> bool:
         if v is None:
             return False
@@ -3553,21 +3554,21 @@ if __name__ == "__main__":
             if dom_k:
                 domain_to_record_indices.setdefault(dom_k, []).append(idx)
 
-    enrich_kw = dict(
-        is_b2b=not cli.no_b2b,
-        dynamic_first_scrape=cli.dynamic,
-        dynamic_about_scrape=cli.dynamic,
-        allow_domain_correction=not cli.no_domain_correction,
-        scrape_linkedin_company_page=not cli.no_linkedin_scrape,
-        google_search_for_description=not cli.no_google_search_description,
-        linkedin_scraper_api_key=(cli.linkedin_scraper_api_key or None),
-    )
-
     total = len(domains)
     for i, dom in enumerate(domains, start=1):
         print(f"\n{'=' * 60}\n[{i}/{total}] {dom}\n{'=' * 60}", flush=True)
         try:
-            enr = enrich_company_web_profile(dom, cli.api_key, **enrich_kw)
+            enr = enrich_company_web_profile(
+                dom,
+                cli.api_key,
+                is_b2b=not cli.no_b2b,
+                dynamic_first_scrape=cli.dynamic,
+                dynamic_about_scrape=cli.dynamic,
+                allow_domain_correction=not cli.no_domain_correction,
+                scrape_linkedin_company_page=not cli.no_linkedin_scrape,
+                google_search_for_description=not cli.no_google_search_description,
+                linkedin_scraper_api_key=(cli.linkedin_scraper_api_key or None),
+            )
         except Exception as e:
             print(f"Skipping {dom}: scraping failed with exception: {e}", flush=True)
             continue
